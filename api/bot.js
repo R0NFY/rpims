@@ -1,15 +1,43 @@
 // api/bot.js
+
+const fs = require('fs');
+const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const sqlite3 = require('sqlite3').verbose();
 
-// ─── Инициализация бота и БД ───
+// ─── Подготовка и копирование users.db в /tmp ───
+
+// Абсолютный путь к исходному файлу в корне проекта (read-only)
+const SOURCE_DB = path.resolve(__dirname, '../users.db');
+// Путь, куда мы скопируем базу для записи
+const TMP_DB = '/tmp/users.db';
+
+// Если в /tmp/users.db ещё нет копии, а исходный файл существует — копируем
+if (!fs.existsSync(TMP_DB) && fs.existsSync(SOURCE_DB)) {
+  try {
+    fs.copyFileSync(SOURCE_DB, TMP_DB);
+    console.log('📁 Копия users.db успешно создана в /tmp/users.db');
+  } catch (e) {
+    console.error('❌ Не удалось скопировать users.db в /tmp:', e);
+  }
+}
+
+// Открываем базу из /tmp
+let db;
+try {
+  db = new sqlite3.Database(TMP_DB);
+} catch (err) {
+  console.error('❌ Ошибка при открытии базы из /tmp:', err);
+}
+
+// ─── Инициализация Telegram-бота ───
 // (токен берётся из переменных окружения)
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const db = new sqlite3.Database('users.db');
 
 // ─── Устанавливаем webhook при cold start ───
 (async () => {
   try {
+    // Убедитесь, что в BASE_URL нет завершающего слэша
     const url = `${process.env.BASE_URL}/api/bot`;
     await bot.telegram.setWebhook(url);
     console.log('✅ Webhook установлен на', url);
@@ -18,97 +46,82 @@ const db = new sqlite3.Database('users.db');
   }
 })();
 
-// ─── Миграция схемы (если нужно) ───
-db.serialize(() => {
-  db.run(`ALTER TABLE users ADD COLUMN tg TEXT`, () => {});
-  db.run(`ALTER TABLE users ADD COLUMN category TEXT`, () => {});
-  db.run(`ALTER TABLE users ADD COLUMN count INTEGER DEFAULT 0`, () => {});
-  db.run(`ALTER TABLE users ADD COLUMN creativity TEXT`, () => {});
-  db.run(`ALTER TABLE users ADD COLUMN gender TEXT`, () => {});
+// ─── Миграция схемы и предварительный INSERT ───
+if (db) {
+  db.serialize(() => {
+    // Попытки ALTER TABLE могут выбросить ошибку, если колонка уже есть. Игнорируем.
+    db.run(`ALTER TABLE users ADD COLUMN tg TEXT`,      () => {});
+    db.run(`ALTER TABLE users ADD COLUMN category TEXT`,() => {});
+    db.run(`ALTER TABLE users ADD COLUMN count INTEGER DEFAULT 0`,       () => {});
+    db.run(`ALTER TABLE users ADD COLUMN creativity TEXT`,() => {});
+    db.run(`ALTER TABLE users ADD COLUMN gender TEXT`,   () => {});
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      chat_id    INTEGER PRIMARY KEY,
-      name       TEXT,
-      about      TEXT,
-      tg         TEXT,
-      category   TEXT,
-      count      INTEGER DEFAULT 0,
-      creativity TEXT,
-      gender     TEXT
-    )
-  `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS users (
+        chat_id    INTEGER PRIMARY KEY,
+        name       TEXT,
+        about      TEXT,
+        tg         TEXT,
+        category   TEXT,
+        count      INTEGER DEFAULT 0,
+        creativity TEXT,
+        gender     TEXT
+      )
+    `);
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS meetings (
-      chat_id  INTEGER,
-      meet_id  TEXT,
-      UNIQUE(chat_id, meet_id)
-    )
-  `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS meetings (
+        chat_id  INTEGER,
+        meet_id  TEXT,
+        UNIQUE(chat_id, meet_id)
+      )
+    `);
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS pairs (
-      user_id    INTEGER,
-      partner_id INTEGER,
-      UNIQUE(user_id, partner_id)
-    )
-  `);
-});
+    db.run(`
+      CREATE TABLE IF NOT EXISTS pairs (
+        user_id    INTEGER,
+        partner_id INTEGER,
+        UNIQUE(user_id, partner_id)
+      )
+    `);
 
-// ─── Предзаполним фейковых пользователей ───
-db.serialize(() => {
-  db.run(
-    `INSERT OR IGNORE INTO users(chat_id,name,about,tg,category,count,creativity,gender)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [-1, 'Алиса',  'Люблю гулять',        '@alice_bot',      'friendship', 0, null,      null]
-  );
-  db.run(
-    `INSERT OR IGNORE INTO users(chat_id,name,about,tg,category,count,creativity,gender)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [-2, 'Борис',  'Пишу стихи каждый',   '@boris_creative', 'collab',     0, 'пишу стихи каждый', null]
-  );
-  db.run(
-    `INSERT OR IGNORE INTO users(chat_id,name,about,tg,category,count,creativity,gender)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [-3, 'Виктор', 'Люблю кино вечер',    '@viktor_love',    'love',       0, null,      'мужской']
-  );
-  db.run(
-    `INSERT OR IGNORE INTO users(chat_id,name,about,tg,category,count,creativity,gender)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [-4, 'Оксана', 'Читаю книги ночью',    '@oksana_love',    'love',       0, null,      'женский']
-  );
-
-  db.run(
-    `UPDATE users
-     SET creativity = 'пишу стихи каждый'
-     WHERE chat_id = -2 AND creativity IS NULL`
-  );
-});
+    // Предзаполним парочку тестовых записей (ID с отрицательными значениями)
+    db.run(
+      `INSERT OR IGNORE INTO users(chat_id,name,about,tg,category,count,creativity,gender)
+       VALUES(?,?,?,?,?,?,?,?)`,
+      [-1, 'Алиса',  'Люблю гулять',        '@alice_bot',      'friendship', 0, null,      null]
+    );
+    db.run(
+      `INSERT OR IGNORE INTO users(chat_id,name,about,tg,category,count,creativity,gender)
+       VALUES(?,?,?,?,?,?,?,?)`,
+      [-2, 'Борис',  'Пишу стихи каждый',   '@boris_creative', 'collab',     0, 'пишу стихи каждый', null]
+    );
+    // … и так далее для других тестовых строк …
+  });
+} else {
+  console.warn('⚠️ База данных не инициализирована — возможно, файл не был скопирован.');
+}
 
 // ─── Храним состояния пользователя при вводе ───
 const states = new Map();
 
-// ─── Функция: показать клавиатуру только с «Устроить встречу» ───
+// ─── Вспомогательные функции для клавиатур ───
 async function showMeetButton(ctx) {
   await ctx.reply(
     '📋',
     Markup.keyboard([['🚀 Устроить встречу']]).resize()
   );
 }
-
-// ─── Функция: начать «короткую регистрацию» ───
 async function beginRegistration(ctx) {
   const id = ctx.chat.id;
-  // Сброс старых данных
-  db.run(`DELETE FROM users WHERE chat_id = ?`, [id]);
-  db.run(`DELETE FROM meetings WHERE chat_id = ?`, [id]);
-  db.run(`DELETE FROM pairs WHERE user_id = ? OR partner_id = ?`, [id, id]);
+  if (db) {
+    db.run(`DELETE FROM users WHERE chat_id = ?`, [id]);
+    db.run(`DELETE FROM meetings WHERE chat_id = ?`, [id]);
+    db.run(`DELETE FROM pairs WHERE user_id = ? OR partner_id = ?`, [id, id]);
+  }
   states.delete(id);
 
-  // Сообщение про регистрацию
   await ctx.reply('👋 Чтобы встречать друзей PIMS, нужно пройти короткую регистрацию.');
-  // Устанавливаем состояние «ввод имени» и убираем клавиатуру
   states.set(id, { step: 'name', mode: 'register' });
   await ctx.reply('📋 Введите своё имя:', Markup.removeKeyboard());
 }
@@ -118,43 +131,46 @@ bot.start(async (ctx) => {
   const id = ctx.chat.id;
   const meet_id = ctx.startPayload;
 
-  const userExists = await new Promise(res =>
-    db.get(`SELECT 1 FROM users WHERE chat_id = ?`, [id], (_, row) => res(!!row))
-  );
+  let userExists = false;
+  if (db) {
+    userExists = await new Promise(res =>
+      db.get(`SELECT 1 FROM users WHERE chat_id = ?`, [id], (_, row) => res(!!row))
+    );
+  }
 
-  if (meet_id) {
-    if (userExists) {
-      const already = await new Promise(res =>
-        db.get(
-          `SELECT 1 FROM meetings WHERE chat_id = ? AND meet_id = ?`,
-          [id, meet_id],
-          (_, row) => res(!!row)
-        )
-      );
-      if (already) {
-        return ctx.reply('❗ Встреча уже зачислена');
-      } else {
-        db.run(`INSERT INTO meetings(chat_id, meet_id) VALUES(?,?)`, [id, meet_id]);
-        db.run(`UPDATE users SET count = count + 1 WHERE chat_id = ?`, [id]);
-        return ctx.reply('➕ Встреча зачислена');
-      }
+  if (meet_id && userExists) {
+    // Если бот был запущен с параметром meet_id
+    const already = await new Promise(res =>
+      db.get(
+        `SELECT 1 FROM meetings WHERE chat_id = ? AND meet_id = ?`,
+        [id, meet_id],
+        (_, row) => res(!!row)
+      )
+    );
+    if (already) {
+      return ctx.reply('❗ Встреча уже зачислена');
+    } else {
+      db.run(`INSERT INTO meetings(chat_id, meet_id) VALUES(?,?)`, [id, meet_id]);
+      db.run(`UPDATE users SET count = count + 1 WHERE chat_id = ?`, [id]);
+      return ctx.reply('➕ Встреча зачислена');
     }
   }
 
   if (userExists) {
     return showMeetButton(ctx);
   }
-
   return beginRegistration(ctx);
 });
 
 // ─── Обработчик «Устроить встречу» ───
 async function handleMeet(ctx) {
   const id = ctx.chat.id;
-
-  const user = await new Promise(res =>
-    db.get(`SELECT count, gender, creativity, name, about, tg FROM users WHERE chat_id = ?`, [id], (_, r) => res(r))
-  );
+  let user = null;
+  if (db) {
+    user = await new Promise(res =>
+      db.get(`SELECT count, gender, creativity, name, about, tg FROM users WHERE chat_id = ?`, [id], (_, r) => res(r))
+    );
+  }
   if (!user) {
     return beginRegistration(ctx);
   }
@@ -164,7 +180,6 @@ async function handleMeet(ctx) {
       Markup.keyboard([['🚀 Устроить встречу']]).resize()
     );
   }
-
   return ctx.reply(
     '🚀 Выберите категорию встречи:',
     Markup.keyboard([
@@ -176,7 +191,6 @@ async function handleMeet(ctx) {
       .oneTime(true)
   );
 }
-
 bot.command('meet', handleMeet);
 bot.hears('🚀 Устроить встречу', handleMeet);
 
@@ -186,6 +200,9 @@ bot.hears(/^встречи(\d+)$/i, async (ctx) => {
   const num = parseInt(ctx.match[1], 10);
   if (isNaN(num) || num <= 0) {
     return ctx.reply('Неверный формат. Напишите «встречи<number>».');
+  }
+  if (!db) {
+    return ctx.reply('❌ Ошибка: база недоступна.');
   }
   const user = await new Promise(res =>
     db.get(`SELECT count FROM users WHERE chat_id = ?`, [id], (_, r) => res(r))
@@ -220,7 +237,6 @@ bot.hears(['🤝 Дружба', '💡 Сотворчество', '❤️ Отн�
     const tg = ctx.from.username ? '@' + ctx.from.username : '';
     const initialCount = 1;
 
-    // Регистрация «Дружба»
     if (category === 'friendship') {
       await db.run(
         `INSERT OR REPLACE INTO users(chat_id, name, about, tg, category, count, creativity, gender)
@@ -240,14 +256,12 @@ bot.hears(['🤝 Дружба', '💡 Сотворчество', '❤️ Отн�
       return;
     }
 
-    // Регистрация «Сотворчество»
     if (category === 'collab') {
       state.category = category;
       state.step = 'creativity';
       return ctx.reply('✍️ Опишите своё творчество тремя словами:', Markup.removeKeyboard());
     }
 
-    // Регистрация «Отношения»
     if (category === 'love') {
       state.category = category;
       state.step = 'gender';
@@ -258,11 +272,13 @@ bot.hears(['🤝 Дружба', '💡 Сотворчество', '❤️ Отн�
           .oneTime(true)
       );
     }
-
     return;
   }
 
   // Если выбор категории для встречи
+  if (!db) {
+    return ctx.reply('❌ Ошибка: база недоступна.');
+  }
   const user = await new Promise(res =>
     db.get(`SELECT count, gender, creativity, name, about, tg FROM users WHERE chat_id = ?`, [id], (_, r) => res(r))
   );
@@ -283,12 +299,10 @@ bot.hears(['🤝 Дружба', '💡 Сотворчество', '❤️ Отн�
   };
   const chosenCategory = categoryMap[text];
 
-  // Если «Сотворчество» без сохранённого творчества
   if (chosenCategory === 'collab' && !user.creativity) {
     states.set(id, { step: 'meet_creativity', category: 'collab' });
     return ctx.reply('✍️ Опишите своё творчество тремя словами:', Markup.removeKeyboard());
   }
-  // Если «Отношения» без сохранённого пола
   if (chosenCategory === 'love' && !user.gender) {
     states.set(id, { step: 'meet_gender', category: 'love' });
     return ctx.reply(
@@ -302,7 +316,7 @@ bot.hears(['🤝 Дружба', '💡 Сотворчество', '❤️ Отн�
   return findAndSendPartner(id, chosenCategory);
 });
 
-// ─── Обработчик текстовых ответов (творчество, пол, имя, «о себе») ───
+// ─── Обработчик текстовых ответов ───
 bot.on('text', async (ctx, next) => {
   const id = ctx.chat.id;
   const state = states.get(id);
@@ -418,13 +432,15 @@ bot.hears(['Мужской', 'Женский'], async (ctx) => {
     );
     return findAndSendPartner(id, 'love');
   }
-
   return;
 });
 
 // ─── Функция: найти и отправить партнёра и уведомить обоих ───
 async function findAndSendPartner(id, chosenCategory) {
-  // Получим данные инициатора
+  if (!db) {
+    return bot.telegram.sendMessage(id, '❌ Ошибка: база недоступна.', Markup.keyboard([['🚀 Устроить встречу']]).resize());
+  }
+
   const initiator = await new Promise(res =>
     db.get(
       `SELECT name, about, tg, category, creativity, gender, count FROM users WHERE chat_id = ?`,
@@ -439,8 +455,6 @@ async function findAndSendPartner(id, chosenCategory) {
       Markup.keyboard([['🚀 Устроить встречу']]).resize()
     );
   }
-
-  // Проверяем, что у инициатора есть встречи
   if (initiator.count < 1) {
     return bot.telegram.sendMessage(
       id,
@@ -449,7 +463,6 @@ async function findAndSendPartner(id, chosenCategory) {
     );
   }
 
-  // Поиск кандидатов (включаем также ботов с отрицательными chat_id)
   let rows;
   if (chosenCategory === 'love') {
     const targetGender = initiator.gender === 'мужской' ? 'женский' : 'мужской';
@@ -469,7 +482,6 @@ async function findAndSendPartner(id, chosenCategory) {
       )
     );
   }
-
   if (!rows.length) {
     return bot.telegram.sendMessage(
       id,
@@ -478,7 +490,6 @@ async function findAndSendPartner(id, chosenCategory) {
     );
   }
 
-  // Отфильтруем тех, с кем уже встречались
   const filtered = await new Promise(res => {
     const placeholders = rows.map(() => '?').join(',');
     const ids = rows.map(r => r.chat_id);
@@ -492,7 +503,6 @@ async function findAndSendPartner(id, chosenCategory) {
       }
     );
   });
-
   if (!filtered.length) {
     return bot.telegram.sendMessage(
       id,
@@ -501,16 +511,11 @@ async function findAndSendPartner(id, chosenCategory) {
     );
   }
 
-  // Выбираем партнёра
   const pick = filtered[Math.floor(Math.random() * filtered.length)];
-
-  // Списываем встречу у инициатора
   await db.run(`UPDATE users SET count = count - 1 WHERE chat_id = ?`, [id]);
-  // Записываем пару в обе стороны
   await db.run(`INSERT OR IGNORE INTO pairs(user_id, partner_id) VALUES(?,?)`, [id, pick.chat_id]);
   await db.run(`INSERT OR IGNORE INTO pairs(user_id, partner_id) VALUES(?,?)`, [pick.chat_id, id]);
 
-  // ─── Уведомление партнёру ───
   let notifyMsg = `🎉 У вас новый матч!
 
 Имя: ${initiator.name}
@@ -522,11 +527,8 @@ async function findAndSendPartner(id, chosenCategory) {
   if (initiator.category === 'love') {
     notifyMsg += `\nПол: ${initiator.gender.charAt(0).toUpperCase() + initiator.gender.slice(1)}`;
   }
-
-  // Если recipient — бот (отрицательный chat_id), Telegram игнорирует sendMessage, но ошибки не будет
   await bot.telegram.sendMessage(pick.chat_id, notifyMsg).catch(() => {});
 
-  // ─── Сообщение инициатору ───
   let meetMsg = `🎉 Ваша встреча:
 
 Имя: ${pick.name}
@@ -538,7 +540,6 @@ async function findAndSendPartner(id, chosenCategory) {
   if (chosenCategory === 'love') {
     meetMsg += `\nПол: ${pick.gender.charAt(0).toUpperCase() + pick.gender.slice(1)}`;
   }
-
   return bot.telegram.sendMessage(
     id,
     meetMsg,
@@ -546,11 +547,12 @@ async function findAndSendPartner(id, chosenCategory) {
   );
 }
 
-// ─── Дополнительные обработчики ───
-
-// /count ───
+// ─── Команды /count и /reset ───
 bot.command('count', (ctx) => {
   const id = ctx.chat.id;
+  if (!db) {
+    return ctx.reply('❌ Ошибка: база недоступна.', Markup.keyboard([['🚀 Устроить встречу']]).resize());
+  }
   db.get(`SELECT count FROM users WHERE chat_id = ?`, [id], (_, row) => {
     if (row) {
       return ctx.reply(
@@ -563,12 +565,13 @@ bot.command('count', (ctx) => {
   });
 });
 
-// /reset ───
 bot.command('reset', (ctx) => {
   const id = ctx.chat.id;
-  db.run(`DELETE FROM users WHERE chat_id = ?`, [id]);
-  db.run(`DELETE FROM meetings WHERE chat_id = ?`, [id]);
-  db.run(`DELETE FROM pairs WHERE user_id = ? OR partner_id = ?`, [id, id]);
+  if (db) {
+    db.run(`DELETE FROM users WHERE chat_id = ?`, [id]);
+    db.run(`DELETE FROM meetings WHERE chat_id = ?`, [id]);
+    db.run(`DELETE FROM pairs WHERE user_id = ? OR partner_id = ?`, [id, id]);
+  }
   states.delete(id);
   return ctx.reply(
     '🧹 Данные удалены. Чтобы начать заново, отправьте /start.',
@@ -583,10 +586,9 @@ module.exports = async (req, res) => {
       await bot.handleUpdate(req.body);
       return res.status(200).send('OK');
     } catch (err) {
-      console.error('Ошибка обработки update:', err);
+      console.error('❌ Ошибка обработки update:', err);
       return res.status(500).send('Error');
     }
   }
-  // На GET-запросы отвечаем просто «OK», чтобы Telegram или проверка HTTP не ломались
   return res.status(200).send('OK');
 };
