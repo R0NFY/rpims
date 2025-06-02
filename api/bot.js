@@ -1,9 +1,22 @@
+// api/bot.js
 const { Telegraf, Markup } = require('telegraf');
 const sqlite3 = require('sqlite3').verbose();
 
-// ─── Настройка бота и базы данных ───
-const bot = new Telegraf('8000532929:AAFNBE-E5gCEeHrNaiWbBJbY-DSVv1osWPg');
+// ─── Инициализация бота и БД ───
+// (токен берётся из переменных окружения)
+const bot = new Telegraf(process.env.BOT_TOKEN);
 const db = new sqlite3.Database('users.db');
+
+// ─── Устанавливаем webhook при cold start ───
+(async () => {
+  try {
+    const url = `${process.env.BASE_URL}/api/bot`;
+    await bot.telegram.setWebhook(url);
+    console.log('✅ Webhook установлен на', url);
+  } catch (err) {
+    console.error('❌ Не удалось установить webhook:', err);
+  }
+})();
 
 // ─── Миграция схемы (если нужно) ───
 db.serialize(() => {
@@ -135,7 +148,7 @@ bot.start(async (ctx) => {
   return beginRegistration(ctx);
 });
 
-// ─── Обработчик «Устроить встречу» (через команду /meet или кнопку) ───
+// ─── Обработчик «Устроить встречу» ───
 async function handleMeet(ctx) {
   const id = ctx.chat.id;
 
@@ -289,7 +302,7 @@ bot.hears(['🤝 Дружба', '💡 Сотворчество', '❤️ Отн�
   return findAndSendPartner(id, chosenCategory);
 });
 
-// ─── Обработчик текстовых ответов (ввод творчества, пола, имени, «о себе») ───
+// ─── Обработчик текстовых ответов (творчество, пол, имя, «о себе») ───
 bot.on('text', async (ctx, next) => {
   const id = ctx.chat.id;
   const state = states.get(id);
@@ -563,7 +576,17 @@ bot.command('reset', (ctx) => {
   );
 });
 
-// ─── Запуск бота ───
-bot.launch().then(() => {
-  console.log('🤖 Бот запущен');
-});
+// ─── Экспорт handler’а для Vercel ───
+module.exports = async (req, res) => {
+  if (req.method === 'POST') {
+    try {
+      await bot.handleUpdate(req.body);
+      return res.status(200).send('OK');
+    } catch (err) {
+      console.error('Ошибка обработки update:', err);
+      return res.status(500).send('Error');
+    }
+  }
+  // На GET-запросы отвечаем просто «OK», чтобы Telegram или проверка HTTP не ломались
+  return res.status(200).send('OK');
+};
